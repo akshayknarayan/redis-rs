@@ -126,7 +126,10 @@ pub trait AsyncStream: AsyncRead + AsyncWrite {}
 impl<S> AsyncStream for S where S: AsyncRead + AsyncWrite {}
 
 /// Represents a `PubSub` connection.
-pub struct PubSub<C = Pin<Box<dyn AsyncStream + Send + Sync>>>(Connection<C>);
+pub struct PubSub<C = Pin<Box<dyn AsyncStream + Send + Sync>>> {
+    con: Connection<C>,
+    buf: Vec<u8>,
+}
 
 /// Represents a `Monitor` connection.
 pub struct Monitor<C = Pin<Box<dyn AsyncStream + Send + Sync>>>(Connection<C>);
@@ -136,39 +139,37 @@ where
     C: Unpin + AsyncRead + AsyncWrite + Send,
 {
     fn new(con: Connection<C>) -> Self {
-        Self(con)
+        Self {
+            con,
+            buf: Default::default(),
+        }
+    }
+
+    async fn command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisResult<()> {
+        self.buf.clear();
+        cmd.write_packed_command(&mut self.buf);
+        self.con.con.write_all(&self.buf).await?;
+        Ok(())
     }
 
     /// Subscribes to a new channel.
     pub async fn subscribe<T: ToRedisArgs>(&mut self, channel: T) -> RedisResult<()> {
-        Ok(cmd("SUBSCRIBE")
-            .arg(channel)
-            .query_async(&mut self.0)
-            .await?)
+        self.command(cmd("SUBSCRIBE").arg(channel)).await
     }
 
     /// Subscribes to a new channel with a pattern.
     pub async fn psubscribe<T: ToRedisArgs>(&mut self, pchannel: T) -> RedisResult<()> {
-        Ok(cmd("PSUBSCRIBE")
-            .arg(pchannel)
-            .query_async(&mut self.0)
-            .await?)
+        self.command(cmd("PSUBSCRIBE").arg(pchannel)).await
     }
 
     /// Unsubscribes from a channel.
     pub async fn unsubscribe<T: ToRedisArgs>(&mut self, channel: T) -> RedisResult<()> {
-        Ok(cmd("UNSUBSCRIBE")
-            .arg(channel)
-            .query_async(&mut self.0)
-            .await?)
+        self.command(cmd("UNSUBSCRIBE").arg(channel)).await
     }
 
     /// Unsubscribes from a channel with a pattern.
     pub async fn punsubscribe<T: ToRedisArgs>(&mut self, pchannel: T) -> RedisResult<()> {
-        Ok(cmd("PUNSUBSCRIBE")
-            .arg(pchannel)
-            .query_async(&mut self.0)
-            .await?)
+        self.command(cmd("PUNSUBSCRIBE").arg(pchannel)).await
     }
 
     /// Returns [`Stream`] of [`Msg`]s from this [`PubSub`]s subscriptions.
@@ -177,7 +178,7 @@ where
     /// the helper methods on it.
     pub fn on_message(&mut self) -> impl Stream<Item = Msg> + '_ {
         ValueCodec::default()
-            .framed(&mut self.0.con)
+            .framed(&mut self.con.con)
             .into_stream()
             .filter_map(|msg| Box::pin(async move { Msg::from_value(&msg.ok()?) }))
     }
@@ -190,16 +191,16 @@ where
     //  than the [`PubSub`].
     pub fn into_on_message(self) -> impl Stream<Item = Msg> {
         ValueCodec::default()
-            .framed(self.0.con)
+            .framed(self.con.con)
             .into_stream()
             .filter_map(|msg| Box::pin(async move { Msg::from_value(&msg.ok()?) }))
     }
 
     /// Exits from `PubSub` mode and converts [`PubSub`] into [`Connection`].
     pub async fn into_connection(mut self) -> Connection<C> {
-        self.0.exit_pubsub().await.ok();
+        self.con.exit_pubsub().await.ok();
 
-        self.0
+        self.con
     }
 }
 
